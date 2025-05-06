@@ -1,0 +1,563 @@
+---
+title: "R script of Data-driven Regularized Adaptive Risk Forecasting Oct26"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+```
+
+
+```{r}
+rm(list=ls(all=TRUE)) # Remove objects from environment
+```
+
+
+\section{Install and load package}
+
+```{r}
+# Load required packages
+library(zoo)
+library(tseries)
+library(fGarch)
+library(PEIP)
+library(tidyverse)
+library(gridExtra)
+library(gdata)
+library(xtable)
+library(vioplot)
+library(moments)
+```
+
+
+\section{Download the data}
+
+```{r}
+# Set start and end date of data to download
+dateStart <- "2010-01-01"               
+dateEnd <- "2021-11-26"               # sdate3 <- "12-15-2001"
+
+startD=as.Date(dateStart, "%Y-%m-%d") # date <- as.Date(date, "%m-%d-%Y"); ndate3
+startD
+endD=as.Date(dateEnd, "%Y-%m-%d")
+
+sprintf("We consider %d days", endD-startD)
+
+# CBOE Volatility Index (^VIX)
+VIX <- get.hist.quote(instrument="^VIX",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+# S&P 500 (^GSPC)
+# SP500 <- get.hist.quote(instrument="^GSPC",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+#                         retclass="zoo")
+
+# Amazon.com, Inc. (AMZN)
+AMZN <- get.hist.quote(instrument="AMZN",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+# Meta Platforms, Inc. (FB)
+FB <- get.hist.quote(instrument="META",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+# Apple Inc. (AAPL)
+AAPL <- get.hist.quote(instrument="AAPL",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+## Alphabet Inc. (GOOG)
+GOOG <- get.hist.quote(instrument="GOOG",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+
+### Plot the five datasets to understand the basics.
+data <- merge(AAPL,AMZN,FB,GOOG,VIX) # price data
+head(data)
+tail(data)
+
+# Identify and remive missing value
+sum(is.na(data))
+data <- na.omit(data)   # Apply na.omit function
+sum(is.na(data))
+
+# inspect the price data
+# cat("Start: ", as.character(start(BITCOIN)), "  End: ", as.character(end(BITCOIN)))
+
+names(data)<-c("Price.AAPL","Price.AMZN","Price.FB","Price.GOOG","Price.VIX")
+
+
+return.cc = diff(log(data))
+ret.cc<-as.data.frame(tail(return.cc, 3000)) # latest 3000 observations
+p <- seq(0.001, 0.01, 0.0001) #p for VaR
+main.names<-c("APPL","AMZN","FB","GOOG","VIX")
+#write.csv(data,'data.csv')
+```
+
+
+```{r}
+# sample correlation
+rho.cal<-function(X){
+  rho.hat<-cor(sign(X-mean(X)), X-mean(X))
+  return(rho.hat)
+}
+
+# Volatility correlation
+rho.vol<-function(X){
+  rho.vol<-cor(abs(X-mean(X)), (X-mean(X))^2)
+  return(rho.vol)
+}
+
+ret.0.cc<-ret.cc
+for(j in 1:ncol(return.cc)){
+  ret.0.cc[, j]<-ret.cc[, j]-mean(ret.cc[, j]) # This is the centered log returns
+}
+
+
+rho<-apply(as.matrix(ret.0.cc), MARGIN=2, FUN=rho.cal)
+rhov<-apply(as.matrix(ret.0.cc), MARGIN=2, FUN=rho.vol)
+# calculate degree of freedom
+# PEIP package is used here for uniroot function
+nu<-rep(0, ncol(return.cc)) 
+for(i in 1:ncol(return.cc)){
+  fun <- function (x) rho[i]*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+  nu[i] <- uniroot(fun, c(2, 8))$root
+}
+number<-ncol(data)
+# Finding ACF
+acf.s<-rep(0, number)  # ACF of the log returns
+acf.abs<-rep(0, number) # ACF of the absolute returns
+acf.sq<-rep(0, number) # ACF of the squared returns
+for(j in 1:number){
+  acf.s[j]<-acf(ret.0.cc[, j], plot=FALSE)$acf[2]
+  acf.abs[j]<-acf(abs(ret.0.cc[, j]), plot=FALSE)$acf[2]
+  acf.sq[j]<-acf(ret.0.cc[, j]^2, plot=FALSE)$acf[2]
+}
+corr<-data.frame(apply(ret.cc, 2, mean), apply(ret.cc, 2, sd), 
+                 apply(ret.cc, 2, kurtosis),apply(ret.cc, 2, skewness),acf.s, acf.abs, 
+                 acf.sq, rho, nu,rhov)
+rownames(corr)<-main.names
+colnames(corr)<-c("mean", "sd","kurtosis","skewness","series", "abs", "sq", "sign-rho", "df","vol-rho")
+corr
+# require(xtable)
+# xtable(corr, digits=4)
+```
+
+
+\section{Garch model}
+
+
+```{r}
+ret.0<-tail(ret.0.cc, 1000) #latest 1000 observations
+##### normal garch
+VaR_rateG=matrix(0, nrow=length(p), ncol=ncol(ret.0))
+ES_rateG=matrix(0, nrow=length(p), ncol=ncol(ret.0))
+sigma_rate=c()
+omega=c()
+alpha=c()
+beta=c()
+for (j in 1:ncol(ret.0))
+{
+  g = garchFit(~garch(1,1),ret.0[,j],cond.dist="norm",include.mean=FALSE,
+               trace=FALSE)
+  omega[j] = g@fit$matcoef[1,1]
+  alpha[j] = g@fit$matcoef[2,1]
+  beta[j] = g@fit$matcoef[3,1]
+  sigma_rate[j] =  omega[j] + alpha[j] * ret.0.cc[,j][T]^2 + beta[j] * g@h.t[T]
+  for(i in 1:length(p)){
+  VaR_rateG[i,j] = -sqrt(sigma_rate[j]) * qnorm(p[i]) * 1000
+  ES_rateG[i,j] = -sqrt(sigma_rate[j])*integrate(function(q){q*dnorm(q)},-Inf,qnorm(p[i]))$value/(p[i]) * 1000
+  }
+}
+```
+
+
+```{r}
+####### t garch
+VaR_ratetG1=matrix(0, nrow=length(p), ncol=ncol(ret.0))
+sigma_rate=c()
+omega=c()
+alphaG=c()
+beta=c()
+ES_ratetG1=matrix(0, nrow=length(p), ncol=ncol(ret.0))
+dfG=c()
+for (j in 1:ncol(ret.0))
+{
+  g = garchFit(~garch(1,1),ret.0[,j],cond.dist="std",include.mean=FALSE,
+               trace=FALSE)
+  omega[j] = g@fit$matcoef[1,1]
+  alphaG[j] = g@fit$matcoef[2,1]
+  beta[j] = g@fit$matcoef[3,1]
+  dfG[j]=g@fit$matcoef[4,1]
+  sigma_rate[j] =  omega[j] + alpha[j] * ret.0[,j][T]^2 + beta[j] * g@h.t[T]
+  for(i in 1:length(p)){
+    VaR_ratetG1[i,j] =(-1)* qstd (p[i], mean = 0, sd = sqrt(sigma_rate[j]), nu = dfG[j])*1000  
+  # using fGarch package to get df
+  ES_ratetG1[i,j] = sqrt(sigma_rate[j])*sqrt((dfG[j]-2)/dfG[j])*dt(qt (p[i],dfG[j]), dfG[j])/p[i]*(dfG[j] + (qt (p[i],dfG[j]))^2)/(dfG[j]-1)*1000}
+}
+VaR_ratetG1[91,]
+```
+
+
+\section{Data Driven method}
+
+\subsection{Choosing optimal value of lambda and alpha_e}
+
+```{r}
+# We are using all 3000 observations here and part of it as testing and part of it as training data
+ret.0.cc<-as.data.frame(ret.cc)
+for(j in 1:ncol(ret.cc)){
+  ret.0.cc[, j]<-ret.cc[, j]-mean(ret.cc[,j])
+}
+```
+
+
+\subsection{Choosing optimal alpha of Data Driven method}
+
+```{r}
+alpha.choose<-function(ret.cen, alpha=seq(0.01, 0.3, 0.01), cut.t){
+  rho<-rho.cal(ret.cen)
+  # rhov<-rho.vol(ret.cen)
+  vol<-abs(ret.cen)/rho # Now we are smoothing abs(ret.cen)/rho , assuming symmetry
+  t<-length(ret.cen) 
+  MSE_alpha<-rep(0, length(alpha))
+  for(a in 1:length(alpha)){
+    s<-mean(vol[1:cut.t])
+    error<-rep(0, t)
+    for(i in 1:t){
+      error[i]<-vol[i]-s
+      s<-alpha[a]*vol[i]+(1-alpha[a])*s
+    }
+    MSE_alpha[a]<-mean(error[-(1:cut.t)]^2)
+  }
+  rmse<-sqrt(min(MSE_alpha))
+  alpha.opt<-alpha[which.min(MSE_alpha)]
+  return(c(rmse, alpha.opt))
+}
+
+```
+
+
+```{r}
+alpha.opt<-rep(0, number)
+rmse.usual<-rep(0, number)
+for(num in 1:number){
+  result<-alpha.choose(ret.0.cc[, num], seq(0.01, 0.3, 0.01), 2000) # Use 2000 observations for training
+  alpha.opt[num]<-result[2]
+  rmse.usual[num]<-result[1]
+}
+alpha.opt;rmse.usual # In Stat - smoothing statistics, in CS tuning parameter
+
+```
+
+
+\subsection{Choosing optimal omega and lambda for elastic method}
+
+
+```{r}
+# Check with original paper and equations
+rmse.elastic.cal<-function(ret.cen, alpha, omega, lambda, cut.t){
+  rho<-rho.cal(ret.cen)
+  # rhov<-rho.vol(ret.cen)
+  vol<-abs(ret.cen)/rho
+  # vol.sub<-vol-sd(ret.cen)
+  s<-mean(vol[1:cut.t])
+  sd.r<-sd(ret.cen)
+  if(abs(s-sd.r)>=omega*lambda)  
+    s.elastic<- sign(s-sd.r)*(abs(s-sd.r)-omega*lambda)/(1+(1-omega)*lambda)+sd.r
+   else s.elastic<-sd.r
+  t<-length(ret.cen)
+  error<-rep(0, t)
+  for(i in 1:t){
+    error[i]<-vol[i]-s.elastic
+    s<-alpha*vol[i]+(1-alpha)*s
+    if(abs(s-sd.r)>=omega*lambda)  
+      s.elastic<-sign(s-sd.r)*(abs(s-sd.r)-omega*lambda)/(1+(1-omega)*lambda)+sd.r
+    else s.elastic<-sd.r
+  }
+  rmse<-sqrt(mean(error[-(1:cut.t)]^2))
+  return(rmse)
+}
+```
+
+
+```{r}
+lambda<-seq(0, 0.004, 0.0002)
+omega<-seq(0, 1, 0.1)
+rmse.elastic.opt<-rep(0, number)
+omega.opt<-rep(0, number)
+lambda.opt<-rep(0, number)
+for(num in 1:number){
+  rmse.elastic<-matrix(0, nrow=length(omega), ncol=length(lambda))
+  for(a in 1:length(omega)){
+    for(l in 1:length(lambda)){
+      rmse.elastic[a, l]<-rmse.elastic.cal(ret.0.cc[, num], alpha.opt[num], 
+                                           omega[a], lambda[l], 2000)
+    }
+  }
+  index.o<-which.min(apply(rmse.elastic, 1, min))
+  index.l<-which.min(apply(rmse.elastic, 2, min))
+  omega.opt[num]<-omega[index.o]
+  lambda.opt[num]<-lambda[index.l]
+  rmse.elastic.opt[num]<-rmse.elastic[index.o, index.l]
+}
+omega.opt; lambda.opt
+rmse.elastic.opt
+```
+
+
+\subsection{Based on optimal alpha, alpha.e, lambda forecast the future value}
+
+
+```{r}
+vol.forecast<-function(ret.cen, alpha, omega, lambda, cut.t){
+  rho<-rho.cal(ret.cen)
+  # rhov<-rho.vol(ret.cen)
+  vol<-abs(ret.cen)/rho
+  sd.r<-sd(ret.cen)
+  t<-length(ret.cen)
+  res<-rep(0, t)
+  res.elastic<-rep(0, t)
+  s<-mean(vol[(1:cut.t)])
+  s.elastic<-sign(s-sd.r)*max((abs(s-sd.r)-
+               omega*lambda), 0)/(1+(1-omega)*lambda)+sd.r
+  fore<-rep(0, t)
+  fore.elastic<-rep(0, t)
+  for(i in 1:t){
+    res[i]<-ret.cen[i]/s
+    res.elastic[i]<-ret.cen[i]/s.elastic
+    fore[i]<-s
+    fore.elastic[i]<-s.elastic
+    s<-alpha*vol[i]+(1-alpha)*s
+    s.elastic<-sign(s-sd.r)*
+              max((abs(s-sd.r)-omega*lambda), 0)/(1+(1-omega)*lambda)+sd.r
+  }
+  fore.vol<-s
+  fore.vol.elastic<-s.elastic
+  return(list(fore.vol, fore.vol.elastic, res, res.elastic, fore, fore.elastic))
+}
+```
+
+
+```{r}
+forecast.vol<-rep(0, number)
+forecast.vol.elastic<-rep(0, number)
+res<-ret.0.cc
+res.elastic<-ret.0.cc
+fore.vary<-ret.0.cc
+fore.elastic.vary<-ret.0.cc
+for(num in 1:number){
+  result<-vol.forecast(ret.0.cc[, num], alpha.opt[num], omega.opt[num], 
+                       lambda.opt[num], 2000)
+  forecast.vol[num]<-result[[1]]
+  forecast.vol.elastic[num]<-result[[2]]
+  res[, num]<-result[[3]]
+  res.elastic[, num]<-result[[4]]
+  fore.vary[, num]<-result[[5]]
+  fore.elastic.vary[, num]<-result[[6]]
+}
+forecast.vol; forecast.vol.elastic
+```
+
+
+```{r}
+vol.obs<-ret.0.cc
+for(num in 1:number){
+  vol.obs[, num]<-abs(ret.0.cc[, num])/rho[num]
+}
+for(num in 1:number){
+  plot(1:1000, tail(vol.obs[, num], 1000), xlab="t", ylab="vol", main=main.names[num], lwd=3,
+       col="yellow", type="l")
+  lines(1:1000, tail(fore.vary[, num], 1000), col="blue", lwd=5)
+  lines(1:1000, tail(fore.elastic.vary[, num], 1000), col="purple")
+  abline(h=sd(ret.0.cc[, num]), lty=3, col="red", lwd=3)
+  legend("top",legend=c("vol", "NP", "Elastic", "sd"), col=c("yellow", "blue", "black", "red"),
+         lty=c(1, 1, 1, 3), lwd=c(3, 5, 1, 3), cex=0.7)
+}
+for(num in 1:number){
+  plot(1:1000, tail(fore.vary[, num], 1000), col="green", lwd=5, type="l")
+  lines(1:1000, tail(fore.elastic.vary[, num], 1000), col="purple", lwd=4)
+  abline(h=sd(ret.0.cc[, num]), lty=3, col="red", lwd=3)
+  legend("top",legend=c( "NP", "Elastic", "sd"), col=c( "green", "purple", "red"),
+         lty=c(1, 1, 3), lwd=c( 5, 1, 3), cex=0.7)
+}
+
+```
+
+
+```{r}
+vol.CI<-matrix(0, nrow=number, ncol=2)
+vol.CI.elastic<-matrix(0, nrow=number, ncol=2)
+for(i in 1:number){
+  vol.CI[i, ]<-c(forecast.vol[i]+qnorm(0.05, 0, 1)*rmse.usual[i]/sqrt(1000),
+                 forecast.vol[i]+qnorm(0.95, 0, 1)*rmse.usual[i]/sqrt(1000))
+  vol.CI.elastic[i, ]<-c(forecast.vol.elastic[i]+qnorm(0.05, 0,1)*rmse.elastic[i]/sqrt(1000),
+                       forecast.vol.elastic[i]+qnorm(0.95, 0, 1)*rmse.elastic[i]/sqrt(1000))
+}
+
+```
+
+
+\subsection{Caculation of VaR and ES}
+
+```{r}
+scale.p<-function(nu, p) sqrt((nu-2)/nu)*dt(qt (p,nu), nu)/p*(nu + (qt (p,nu))^2)/(nu-1)
+```
+
+
+\subsubsection{Marginal}
+
+```{r}
+VaR.dd<-matrix(0, nrow=length(p), ncol=number)
+ES.dd<-matrix(0, nrow=length(p), ncol=number)
+VaR.dd.elastic<-matrix(0, nrow=length(p), ncol=number)
+ES.dd.elastic<-matrix(0, nrow=length(p), ncol=number)
+for(num in 1:number){
+  for(i in 1:length(p)){
+    VaR.dd[i, num]<-forecast.vol[num]*qstd(p=p[i], nu=nu[num])*(-1000)
+    VaR.dd.elastic[i, num]<-forecast.vol.elastic[num]*qstd(p=0.01, nu=nu[num])*(-1000)
+    ES.dd[i, num]<-forecast.vol[num]*scale.p(nu[num], p[i])*1000
+    ES.dd.elastic[i, num]<-forecast.vol.elastic[num]*scale.p(nu[num], p[i])*1000
+  }
+}
+VaR.dd[91,]; VaR.dd.elastic[91, ]
+ES.dd[91, ]
+no.penalty<-data.frame(alpha.opt, rmse.usual, forecast.vol,(t(VaR.dd)[,91]), (t(ES.dd)[,91]) )
+colnames(no.penalty)<-c("alpha.opt", "RMSE", "Volatility", "VaR", "ES")
+rownames(no.penalty)<-main.names
+xtable(no.penalty, digits=6)
+penalty<-data.frame(omega.opt, lambda.opt,rmse.elastic.opt, forecast.vol.elastic,
+                    t(VaR.dd.elastic)[, 91],(t(ES.dd.elastic)[,91]))
+colnames(penalty)<-c("omega.opt", "lambda.opt","RMSE", "Volatility", "VaR", "ES")
+rownames(penalty)<-main.names
+# xtable(penalty, digits=6)
+penalty
+
+# tempVar1=data.frame(VaR.dd[91,],VaR.dd.elastic[91,])
+# temVar1MR=apply(tempVar1,1,max)/apply(tempVar1,1,min)
+# tempVar2=data.frame(VaR.dd[91,],VaR.dd.elastic[91,],temVar1MR)
+# 
+# tempES1=data.frame(ES.dd[91,],ES.dd.elastic[91,])
+# temES1MR=apply(tempES1,1,max)/apply(tempES1,1,min)
+# tempES2=data.frame(ES.dd[91,],ES.dd.elastic[91,],temES1MR)
+# 
+# output=data.frame(VaR.dd[91,],VaR.dd.elastic[91,],temVar1MR,ES.dd[91,],ES.dd.elastic[91,],temES1MR)
+# rownames(output)<-main.names
+# colnames(output)<-c("DD.VaR","Elastic.VaR","MR1","DD.ES","Elastic.ES","MR2")
+# output
+# print(xtable(output))
+
+```
+
+
+```{r}
+VaR.dd.CI.m<-matrix(0, nrow=number, ncol=4)
+ES.dd.CI.m<-matrix(0, nrow=number, ncol=4)
+for(num in 1:number){
+  VaR.dd.CI.m[num, 1:2]<-(-1000)*qstd(p=0.01, nu=nu[num])*vol.CI[num,]
+  VaR.dd.CI.m[num, 3:4]<-(-1000)*qstd(p=0.01, nu=nu[num])*vol.CI.elastic[num, ]
+  ES.dd.CI.m[num, 1:2]<-(1000)*scale.p(nu[num], 0.01)*vol.CI[num, ]
+  ES.dd.CI.m[num, 3:4]<-(1000)*scale.p(nu[num], 0.01)*vol.CI.elastic[num, ]
+}
+```
+
+
+\subsubsection{Hybrid model}
+
+```{r}
+rho.res<-apply(res, 2, rho.cal)
+rho.res.elastic<-apply(res.elastic, 2, rho.cal)
+nu.res<-rho.res
+nu.res.elastic<-rho.res.elastic
+for(num in 1:number){
+  fun <- function (x) rho.res[num]*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+  nu.res[num] <- uniroot(fun, c(2, 8))$root
+  fun <- function (x) rho.res.elastic[num]*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+  nu.res.elastic[num] <- uniroot(fun, c(2, 8))$root
+}
+nu.res.elastic
+nu.res
+VaR.dd.res<-matrix(0, nrow=length(p), ncol=number)
+ES.dd.res<-matrix(0, nrow=length(p), ncol=number)
+VaR.dd.elastic.res<-matrix(0, nrow=length(p), ncol=number)
+ES.dd.elastic.res<-matrix(0, nrow=length(p), ncol=number)
+for(num in 1:number){
+  for(i in 1:length(p)){
+    VaR.dd.res[i, num]<-forecast.vol[num]*qstd(p=p[i], nu=nu.res[num])*(-1000)
+    VaR.dd.elastic.res[i, num]<-forecast.vol.elastic[num]*qstd(p=p[i], nu=nu.res.elastic[num])*(-1000)
+    ES.dd.res[i, num]<-forecast.vol[num]*scale.p(nu.res[num], p[i])*1000
+    ES.dd.elastic.res[i, num]<-forecast.vol.elastic[num]*scale.p(nu.res.elastic[num], p[i])*1000
+  }
+}
+nu.res
+VaR.dd.elastic.res[91,]
+ES.dd.elastic.res[91,]
+```
+
+
+```{r}
+VaR.dd.CI.res<-matrix(0, nrow=number, ncol=4)
+ES.dd.CI.res<-matrix(0, nrow=number, ncol=4)
+for(num in 1:number){
+  VaR.dd.CI.res[num, 1:2]<-(-1000)*qstd(p=0.01, nu=nu.res[num])*vol.CI[num,]
+  VaR.dd.CI.res[num, 3:4]<-(-1000)*qstd(p=0.01, nu=nu.res.elastic[num])*vol.CI.elastic[num, ]
+  ES.dd.CI.res[num, 1:2]<-(1000)*scale.p(nu.res[num], 0.01)*vol.CI[num, ]
+  ES.dd.CI.res[num, 3:4]<-(1000)*scale.p(nu.res.elastic[num], 0.01)*vol.CI.elastic[num, ]
+}
+VaR.CI<-data.frame(VaR.dd.CI.m[, 1:2], VaR.dd.CI.res[, 1:2],
+                   VaR.dd.CI.res[, 3:4], VaR.dd.CI.res[, 3:4])
+xtable(VaR.CI)
+ES.CI<-data.frame(ES.dd.CI.m[, 1:2], ES.dd.CI.res[, 1:2],
+                   ES.dd.CI.res[, 3:4], ES.dd.CI.res[, 3:4])
+rownames(ES.CI)<-main.names
+xtable(ES.CI)
+```
+
+
+\subseciton{summary of result}
+
+
+```{r}
+table.usual<-data.frame(alpha.opt, rmse.usual, forecast.vol, VaR.dd[length(p),], ES.dd[length(p),])
+table.elastic<-data.frame(omega.opt, rmse.elastic.opt, forecast.vol.elastic, VaR.dd.elastic[length(p), ], ES.dd.elastic[length(p),])
+```
+
+
+\section{Model risk summary}
+
+
+```{r}
+model.risk.VaR <-matrix(0, ncol=number, nrow=length(p))
+model.risk.ES <-matrix(0, ncol=number, nrow=length(p))
+for(num in 1:number){
+  VaR<-data.frame(VaR_rateG[, num], VaR_ratetG1[, num], VaR.dd[, num], VaR.dd.res[, num])
+  ES<-data.frame(ES_rateG[, num], ES_ratetG1[, num], ES.dd[, num], ES.dd.res[, num])
+  model.risk.VaR[, num]<-apply(VaR, 1, max)/apply(VaR, 1, min)
+  model.risk.ES[, num]<-apply(ES, 1, max)/apply(ES, 1, min)
+}
+```
+
+
+
+```{r}
+model.risk.VaR.elastic<-matrix(0, ncol=number, nrow=length(p))
+model.risk.ES.elastic <-matrix(0, ncol=number, nrow=length(p))
+for(num in 1:number){
+  VaR<-data.frame(VaR_rateG[, num], VaR_ratetG1[, num], VaR.dd.elastic[, num], VaR.dd.elastic.res[, num])
+  ES<-data.frame(ES_rateG[, num], ES_ratetG1[, num], ES.dd.elastic[, num], ES.dd.elastic.res[, num])
+  model.risk.VaR.elastic[, num]<-apply(VaR, 1, max)/apply(VaR, 1, min)
+  model.risk.ES.elastic[, num]<-apply(ES, 1, max)/apply(ES, 1, min)
+}
+```
+
+
+\section{Model Risk calculations}
+
+
+```{r}
+MR_report <- data.frame(model.risk.VaR[91,], model.risk.ES[91,], model.risk.VaR.elastic[91,], model.risk.ES.elastic[91,])
+rownames(MR_report)<-main.names
+
+colnames(MR_report) <- c('VaR', 'ES', 'VaR Reg', 'ES Reg')
+print(xtable(MR_report))
+
+```
+
+

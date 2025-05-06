@@ -1,0 +1,357 @@
+---
+title: "Fuzzy VAR and ES Forecasts"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list=ls(all=TRUE)) # Remove objects from environment
+```
+
+
+```{r}
+# Load required packages
+library(tidyverse)
+library(quantmod)
+library(keras)
+library(dygraphs)
+library(xtable)
+library(glue)
+library(forcats)
+library(timetk)
+library(tidyquant)
+library(tibbletime)
+library(cowplot)
+library(recipes)
+library(rsample)
+library(yardstick)
+library(fGarch)
+library(prophet)
+library(rstan)
+
+```
+
+
+```{r}
+# download Apple
+getSymbols("BTC-USD", from = '2019-11-25',
+           to = "2021-11-26",warnings = FALSE,
+           auto.assign = TRUE)
+head(`BTC-USD`)
+tail(`BTC-USD`)
+price<-`BTC-USD`[, 6]
+N<-length(price)
+
+data<- merge (`BTC-USD`$`BTC-USD.Adjusted`, Return.calculate(`BTC-USD`$`BTC-USD.Adjusted`, method = "log"), Return.calculate(`BTC-USD`$`BTC-USD.Adjusted`, method = "difference"))
+
+colnames (data) [1:3] <- c("Price", "LogReturn", "Diff")
+
+data<-na.omit(data[-1,])
+
+data<-data[-1,]
+
+plot(data$LogReturn, col="blue")
+```
+
+
+```{r}
+# calculate sign correlation rho
+rho.cal<-function(X){
+  rho.hat<-cor(sign(X-mean(X)), X-mean(X))
+  return(rho.hat)
+}
+```
+
+
+```{r}
+return_info = function(data){
+  data<-as.numeric(data)
+  mean <- mean(data)
+  sd <- sd(data)
+  signrho <- rho.cal(data)
+  skewness <- skewness(data) #mu_3/sigma^3
+  kurtosis <- kurtosis(data) #excess kurtosis mu_4/sigma^4 - 3
+  fun <- function (x) signrho*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+  nu<- uniroot(fun, c(2, 100))$root
+  acf1<-acf(data, plot=FALSE)$acf[2]
+  acf2<-acf(abs(data), plot=FALSE)$acf[2] 
+  acf3<-acf(data^2, plot=FALSE)$acf[2]
+  return(c(mean, sd, skewness, kurtosis, signrho, nu, acf1, acf2, acf3))
+}
+```
+
+
+```{r}
+ss <- return_info (data$LogReturn)
+xtable(as.data.frame(ss), digits = 4)
+```
+
+
+```{r}
+observed.vol <- function(X){
+  X<-as.numeric(X)
+  X.cdf <- ecdf(X)
+  return(abs(X - mean(X))/(2*rho.cal(X)*sqrt(X.cdf(mean(X))*(1-X.cdf(mean(X))))))
+}
+```
+
+
+```{r}
+vol<-observed.vol(data$LogReturn)
+plot(vol, type = "l", col = "blue")
+```
+
+
+```{r}
+#DD-EWMA
+ddEW <- function(data){ 
+  ptm<-proc.time()
+  alpha<-seq(0.01, 0.3, 0.01)
+  t <- length(data)
+  cut.t <- 50 ### how many l values
+  X.cdf <- ecdf(data)
+  rho<- rho.cal(data)
+  mu <- mean(data)
+  vol<- abs(data - mu)/(2*rho*sqrt(X.cdf(mu)*(1-X.cdf(mu))))
+  MSE_alpha <- rep(0, length(alpha))
+  sn <- rep(0, length(alpha))
+  for(a in 1:length(alpha)){
+    s <- mean(vol[1:cut.t])
+    error<-rep(0, t)
+    for(i in 1:t){
+      error[i]<-vol[i]-s
+      s<-alpha[a]*vol[i]+(1-alpha[a])*s
+    }
+    MSE_alpha[a]<-mean(error[-(1:cut.t)]^2)
+    sn[a] <- s
+  }
+  dd.vol.fore <- sn[which.min(MSE_alpha)]
+  rmse <- sqrt(min(MSE_alpha))
+  return(c(dd.vol.fore, rmse, proc.time()-ptm))
+}
+```
+
+
+```{r}
+## function to estimate by Neuro volatility forecasts  # problem: slow function
+
+neuro.vol <- function(data){ 
+  ptm<-proc.time()
+  X.cdf <- ecdf(data)
+  rho <- rho.cal(data)
+  mu <- mean(data)
+  vol <- abs(data - mu)/(2*rho*sqrt(X.cdf(mu)*(1-X.cdf(mu))))
+  #vol.nnet <- list()
+  vol.nnet <- forecast::nnetar(vol)
+  nn.vol.fore <- forecast::forecast(vol.nnet, PI = TRUE, h=1)
+  rmse <- sqrt(mean((nn.vol.fore$residuals)^2, na.rm=TRUE))
+  return(c(as.numeric(nn.vol.fore$mean), rmse, proc.time()-ptm))
+}
+```
+
+
+```{r}
+N <- nrow(data$LogReturn)
+step <- 90
+```
+
+
+```{r}
+for(i in 1:step){
+print(head(data$LogReturn[i:(N-step+i)], 1))
+print(tail(data$LogReturn[i:(N-step+i)], 1))
+}
+```
+
+
+```{r}
+
+info<-c()
+for(i in 1:step){
+  info[[i]]<-return_info(data$LogReturn[i:(N-step+i)])
+}
+info.m<-as.data.frame(matrix(unlist(info), nrow=length(info), byrow=TRUE))[, 5:6]
+
+xtable(as.data.frame(matrix(unlist(info), nrow=length(info), byrow=TRUE)), digits = 4)
+```
+
+
+```{r}
+
+sd<-NA
+for(i in 1:step){
+  sd[i]<-sd(as.numeric(data$LogReturn[i:(N-step+i)]))
+}
+```
+
+
+```{r}
+
+# step = 90 rolling DDVF volatlity forecasts
+ddvf<-c()
+
+for(i in 1:step){
+  ddvf[[i]]<-ddEW(as.numeric(data$LogReturn[i:(N-step+i)]))
+}
+```
+
+
+```{r}
+
+# step = 90 rolling NNVF volatlity forecasts
+nnvf<-c()
+
+for(i in 1:step){
+  set.seed(123+i)
+  nnvf[[i]]<-neuro.vol(as.numeric(data$LogReturn[i:(N-step+i)]))
+}
+```
+
+
+```{r}
+
+ddvf.m <- as.data.frame(matrix(unlist(ddvf), nrow=length(ddvf), byrow=TRUE))[, 1:3]
+colnames (ddvf.m) <- c("DDVF", "ERROR", "TIME")
+xtable(ddvf.m, digits = 4)
+
+sum(ddvf.m$TIME)
+
+nnvf.m <- as.data.frame(matrix(unlist(nnvf), nrow=length(nnvf), byrow=TRUE))[, 1:3]
+colnames (nnvf.m) <- c("NNVF", "ERROR", "TIME")
+xtable(nnvf.m, digits = 4)
+
+sum(nnvf.m$TIME)
+
+xtable(cbind(ddvf.m, nnvf.m), digits = 4)
+```
+
+
+```{r}
+getSymbols("BTC-USD", from = '2019-08-01',
+           to = "2021-11-06",warnings = FALSE,
+           auto.assign = TRUE)
+nrow(`BTC-USD`)
+BTC.Price<-`BTC-USD`[, 6]
+plot(BTC.Price, col = "blue")
+```
+
+
+```{r}
+temp<-tail(data$LogReturn, 90)
+
+vol.data <-cbind(temp, ddvf.m$DDVF, nnvf.m$NNVF, sd)[, -1]   #temp(tail90)dates
+
+colnames(vol.data)<-c("DDVF", "NNVF", "SD")
+```
+
+
+```{r}
+dygraph(vol.data, main = "90-day rolling Apple volatility forecasts") %>%
+dySeries('DDVF', label = 'DDVF', col = "blue") %>%
+dySeries('NNVF', label = 'NVF', col = "red") %>%
+dySeries('SD', label = 'SD', col = "black") %>% 
+  dyLegend(width = 300) %>% 
+dyRangeSelector(height = 20) %>%
+dyOptions(sigFigs=2)
+```
+
+
+## mean, sd and quantiles of the rolling forecasts
+
+
+```{r}
+apply (vol.data, 2, mean)
+apply (vol.data, 2, sd)
+q_numbers <-apply (vol.data, 2, quantile, probs=c(0.05,.25,.75, 0.95)) #quantiles
+print(q_numbers[,1]*sqrt(365), digits = 4)
+print(q_numbers[,2]*sqrt(365), digits = 4)
+```
+
+
+\section{Alpha cuts m = 0.25, n = 0.25, 0.75, 1}
+
+
+```{r}
+#alpha cuts
+alpha_cuts = function(a,alpha,n){
+  return(sqrt(365)*c(a[1]+alpha^{1/0.25}*(a[2]-a[1]), a[4]-alpha^{1/n}*(a[4]-a[3])))
+}
+```
+
+
+```{r}
+dataD11<-alpha_cuts(a=as.numeric(q_numbers[, 1]), alpha=seq(0,1,0.1), n=0.25)
+dataD21<-alpha_cuts(a=as.numeric(q_numbers[, 1]), alpha=seq(0,1,0.1), n=0.75)
+dataD31<-alpha_cuts(a=as.numeric(q_numbers[, 1]), alpha=seq(0,1,0.1), n=1)
+
+dataD41<-cbind(matrix(dataD11,nrow = 11, ncol = 2), matrix(dataD21,nrow = 11, ncol = 2), matrix(dataD31,nrow = 11, ncol = 2)) #rows are for different alpha, colunm 1, 2 for n = 0.5, colunm 3, 4 for n = 1, colunm 5, 6 for n = 2
+
+xtable(dataD41, digits = 4)
+```
+
+
+\subsection{calculate VaR & ES for DDVF}
+
+
+```{r}
+p=0.01
+dataD41VaR=matrix(0,11,6)
+dataD41ES=matrix(0,11,6)
+for (j in c(1,2,3,4,5,6)) {
+  for (i in 1:11) {
+    dataD41VaR[i,j]<-dataD41[i,j]*(-qnorm(p))*(1000)
+    dataD41ES[i,j]<-dataD41[i,j]*(dnorm(qnorm(p))/p)*(1000)
+  }
+}
+
+xtable(dataD41VaR, digits = 4)
+xtable(dataD41ES, digits = 4)
+
+dataD1VarInterval = dataD41VaR[,c(2,4,6)] - dataD41VaR[,c(1,3,5)]
+xtable(dataD1VarInterval, digits = 2)
+
+dataD1ESInterval = dataD41ES[,c(2,4,6)] - dataD41ES[,c(1,3,5)]
+xtable(dataD1ESInterval, digits = 2)
+
+```
+
+
+```{r}
+dataN11<-alpha_cuts(a=as.numeric(q_numbers[, 2]), alpha=seq(0,1,0.1), n=0.25)
+dataN21<-alpha_cuts(a=as.numeric(q_numbers[, 2]), alpha=seq(0,1,0.1), n=.75)
+dataN31<-alpha_cuts(a=as.numeric(q_numbers[, 2]), alpha=seq(0,1,0.1), n=1)
+
+dataN41<-cbind(matrix(dataN11,nrow = 11, ncol = 2), matrix(dataN21,nrow = 11, ncol = 2), matrix(dataN31,nrow = 11, ncol = 2)) #rows are for different alpha, colunm 1, 2 for n = 0.5, colunm 3, 4 for n = 1, colunm 5, 6 for n = 2
+
+xtable(dataN41, digits = 4)
+```
+
+
+\subsection{calculate VaR & ES for NVF}
+
+
+```{r}
+p=0.01
+dataN41VaR=matrix(0,11,6)
+dataN41ES=matrix(0,11,6)
+for (j in c(1,2,3,4,5,6)) {
+  for (i in 1:11) {
+    dataN41VaR[i,j]<-dataN41[i,j]*(-qnorm(p))*(1000)
+    dataN41ES[i,j]<-dataN41[i,j]*(dnorm(qnorm(p))/p)*(1000)
+  }
+}
+xtable(dataN41VaR, digits = 4)
+xtable(dataN41ES, digits = 4)
+
+dataN1VarInterval = dataN41VaR[,c(2,4,6)] - dataN41VaR[,c(1,3,5)]
+xtable(dataN1VarInterval, digits = 2)
+
+dataN1ESInterval = dataN41ES[,c(2,4,6)] - dataN41ES[,c(1,3,5)]
+xtable(dataN1ESInterval, digits = 2)
+
+```
+

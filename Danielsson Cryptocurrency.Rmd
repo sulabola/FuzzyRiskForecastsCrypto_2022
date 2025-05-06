@@ -1,0 +1,566 @@
+---
+title: "Project-Paper"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list=ls(all=TRUE)) # Remove objects from environment
+```
+
+
+```{r}
+# Load required packages
+library(zoo)
+library(tseries)
+library(MASS)
+library(stats)
+library(car)
+library(moments)
+library(fGarch)
+library(rugarch)
+library(readxl)
+library(plotly)
+library(PerformanceAnalytics)
+library(quantmod)
+library(VGAM)
+library(scales)
+library(PEIP)
+library(tidyverse)
+library(gridExtra)
+library(xtable)
+```
+
+
+\section{Step 1 - Crypto data import from yahoo finance}
+
+```{r, warning=FALSE}
+# Set start and end date of data to download
+dateStart <- "2017-10-01"               
+dateEnd <- "2021-11-26"               # sdate3 <- "12-15-2001"
+
+startD=as.Date(dateStart, "%Y-%m-%d") # date <- as.Date(date, "%m-%d-%Y"); ndate3
+startD
+endD=as.Date(dateEnd, "%Y-%m-%d")
+
+sprintf("We consider %d days", endD-startD)
+
+# Bitcoin USD (BTC-USD) 
+BTC <- get.hist.quote(instrument="BTC-USD",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+# Ether cryptocurrency
+ETH <- get.hist.quote(instrument="ETH-USD",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+# BinanceCoin Cryptocurrency
+BNB <- get.hist.quote(instrument="BNB-USD",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+## Rippe (XRP) cryptocurrency
+XRP <- get.hist.quote(instrument="XRP-USD",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+# Dogecoin USD (DOGE-USD)
+DOGE <- get.hist.quote(instrument="DOGE-USD",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+# Cardano Cryptocurrency
+ADA <- get.hist.quote(instrument="ADA-USD",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+                        retclass="zoo")
+
+# Tether - Stablecoin token on Ethereum blockchain
+# USDT <- get.hist.quote(instrument="USDT-USD",start = dateStart, end=dateEnd,quote = c("AdjClose"),
+#                         retclass="zoo")
+
+## We missed Solana - as it did not have 1000 daily data points(started in Jul-2020)
+
+
+
+### Plot the five datasets to understand the basics.
+data <- merge(BTC,ETH,BNB,XRP,DOGE,ADA) # price data
+head(data)
+tail(data)
+
+# Identify and remive missing value
+sum(is.na(data))
+data <- na.omit(data)   # Apply na.omit function
+sum(is.na(data))
+
+# inspect the price data
+# cat("Start: ", as.character(start(BITCOIN)), "  End: ", as.character(end(BITCOIN)))
+
+names(data)<-c("Price.BTC","Price.ETH","Price.BNB","Price.XRP","Price.DOGE","Price.ADA")
+
+### Daily plot of price
+# Need to set the directory to save the plots
+#pdf("tsplot.pdf", height=6, width=10) #sacf of the original series
+plot(data, xlab="Days", main = "Daily price history of 6 Cryptocurrencies",col=c("black","Blue","red", "green","grey", "purple"))
+#dev.off()
+
+return.cc = diff(log(data))
+names(return.cc)<-c("BTC","ETH","BNB","XRP","DOGE","ADA")
+return.cc=data.frame(return.cc)
+par(mfrow=c(2,3))
+for (i in 1:ncol(return.cc)){
+  chart.Histogram(return.cc[,i], main = paste(names(return.cc)[i]), breaks=40,
+  colorset=c("lightgray","blue","red"),methods = c("add.density", "add.normal"))
+}
+
+
+```
+
+\section{Step 2 - Data Exploration,Summary Stats}
+
+```{r, warning=FALSE}
+########################## Calculation of VaR and ES ############################
+############### rho hat & Summary Statistics & Correlations and sign correlation  #####################
+return.cc = diff(log(data))
+names(return.cc)<-c("BTC","ETH","BNB","XRP","DOGE","ADA")
+return.cc=data.frame(return.cc)
+y1=data.frame(return.cc) ## y1 alias for return.cc
+Mean=percent(apply(y1,2,mean))
+sd=percent(apply(y1,2,sd))
+Min=percent(apply(y1,2,min))
+Max=percent(apply(y1,2,max))
+
+ss1=data.frame(Mean,sd,m=Min,Max)
+### Correlation of return series,absolute return series and squared return series
+# if there is significant correlation we cannot use variance for population variance
+
+# auto correlation of the log return
+acf1=apply(y1,2,acf,lag=1,plot=F)
+corr1=percent(c(acf1$BTC$acf[2],acf1$ETH$acf[2],acf1$BNB$acf[2],acf1$XRP$acf[2],acf1$DOGE$acf[2],acf1$ADA$acf[2])) #Extracting acf values
+# if significant log returns are correlated
+
+# if large conditional variance is changing | squared values
+acf2=apply(y1^2,2,acf,lag=1,plot=F)
+corr2=percent(c(acf2$BTC$acf[2],acf2$ETH$acf[2],acf2$BNB$acf[2],acf2$XRP$acf[2],acf2$DOGE$acf[2],acf2$ADA$acf[2])) #Extracting acf values
+
+# absolute of 
+acf3=apply(abs(y1),2,acf,lag=1,plot=F)
+corr3=percent(c(acf3$BTC$acf[2],acf3$ETH$acf[2],acf3$BNB$acf[2],acf3$XRP$acf[2],acf3$DOGE$acf[2],acf3$ADA$acf[2])) #Extracting acf values
+
+kurt=kurtosis(y1)
+skew=skewness(y1)
+### rho estimates
+yabs<-abs(y1-apply(y1,2,mean))
+
+rho<-apply(yabs,2,mean)/apply(y1,2,sd)
+# once know we can decide the degree of freedom
+
+rho_percent=percent(rho);
+
+# WHEN using data.frame make sure everything has same dimensions
+
+summarystat1=data.frame(names(return.cc),ss1,t(kurt),t(skew))
+summarystat2=data.frame(corr1,corr2,corr3,rho_percent)
+
+summarystat1
+summarystat2
+
+cv=c()
+cv=apply(y1,2,mean)/apply(y1,2,sd)
+summarystat3=data.frame(names(return.cc),ss1$Mean,ss1$sd, cv, t(kurt), t(skew))
+
+print(xtable(summarystat3), include.rownames=FALSE,digits = 2)
+
+# Making latex table
+# library(xtable)
+# xtable(summarystat1)
+# xtable(summarystat2)
+```
+
+\section{Step 3 - VaR Estimates}
+
+\subsection{Defing variables}
+
+```{r}
+WE=1000 # Estimation window which will be used to calculate VaR
+ret.cc_rate=tail(return.cc,WE) # Discard first few observations to ensure TxP as integer
+p = 0.01 ## 1% tail probability
+T = nrow(ret.cc_rate) ## No. of rows
+value = 1000 ## Portfolio value  (Multiplier)
+```
+
+\subsection{Method1 - Historical Simulation}
+
+```{r warning=FALSE}
+################## Method: Historical Simulation (HS) ##############
+
+VaRrate_HS=c()
+ESrate_HS=c()
+for (j in 1:ncol(ret.cc_rate))
+{
+  ys = sort(ret.cc_rate[,j])
+  op = T*p
+  VaRrate_HS[j] = -ys[op]*value
+  ESrate_HS[j] = -mean(ys[1:op])*value
+}
+HSsummary=data.frame(names(ret.cc_rate),VaRrate_HS,ESrate_HS)
+HSsummary
+
+```
+
+\subsection{Method2 - Moving Average}
+
+```{r warning=FALSE}
+########################## Method: MA Normal VaR ###########################
+# Using MA calculate conditional volatility which is the average sum of squared 
+# returns over the estimation window (WE)
+y=ret.cc_rate
+VaR_MA=c()
+sigma=c()
+ES_MA=c()
+for (j in 1:ncol(ret.cc_rate))
+{
+  WE=1000 # Estimation window
+  t=T-WE+1
+  window= y[,j][t:T]    
+  sigma[j]=sd(window)
+  VaR_MA[j] = -sigma[j] * qnorm(p) * value 
+  ES_MA[j] =  sigma[j]*dnorm(qnorm(p))/p * value
+}
+MAsummary=data.frame(names(ret.cc_rate),VaR_MA,ES_MA)
+MAsummary
+
+```
+
+\subsection{Method3 - EWMA}
+
+```{r}
+########################## EWMA #######################################
+
+### EWMA with Fix alpha=0.06: EWMA by Danielsson #####
+
+lambda = 0.94
+VaR_rateFixed=c()
+ES_rateFixed=c()
+sFixed=c()
+for (j in 1:ncol(ret.cc_rate)) 
+{
+    sFixed[j] = var(ret.cc_rate[,j]) # initial variance, using unconditional
+    for (t in 2:T){
+    sFixed[j] = lambda * sFixed[j]  + (1-lambda) * ret.cc_rate[,j][t-1]^2
+    }
+    VaR_rateFixed[j] = -qnorm(p)*sqrt(sFixed[j])*value
+    ES_rateFixed[j] = sqrt(sFixed[j])*dnorm(qnorm(p))/p * value
+}
+EWMADanielsson=data.frame(names(ret.cc_rate),VaR_rateFixed,ES_rateFixed)
+EWMADanielsson
+
+
+# Range for alpha is 0.01 to 0.3. Within this range we check alpha with step size 0.01, thus, 30 possible values
+alpha=seq(.01,.3,.01)
+
+SSE_alpha=matrix(0,nrow=length(alpha),ncol=ncol(return.cc))
+
+# smoothing squared values
+# Function to get optimal alpha that gives minimum SSE foe all data together
+
+for (j in 1:ncol(return.cc)) #j is the number of stocks
+{ 
+  s=c()
+  SSE=c()
+  error=c()
+  for (a in 1:length(alpha))
+  {
+    s[j]=var(return.cc[,j][1:30])
+    SSE[j]=0				
+    for (t in 2:T)
+    {	
+      error[j]=return.cc[,j][t-1]^2-s[j]
+      SSE[j]=error[j]^2+SSE[j]
+      s[a]=alpha[a] * return.cc[,j][t-1]^2+(1-alpha[a]) * s[j] 
+      s[j]=s[a]
+    }
+    SSE_alpha[a,j]=SSE[j]
+  }
+}  
+
+# Make a data frame of errors for all stocks.
+# data_error=data.frame(alpha,SSE_alpha);View(data_error)
+
+# Finding the minimum alpha for all stocks together.
+alpha_rate=c()
+for (j in 1:ncol(SSE_alpha))
+{
+  for (b in 1:length(alpha))
+  {
+    if (SSE_alpha[b,j]==min(SSE_alpha[,j]))
+      alpha_rate[j]=alpha[b]
+  }
+}
+
+# Use the minimum alpha to get VaR value
+VaR_rate=c()
+ES_rate=c()
+SSE1=c()
+error=c()
+s=c()
+
+s1=matrix(NA,1000,ncol(return.cc))
+ee1=matrix(NA,1000,ncol(return.cc))
+error1=c()
+ss1=c()
+for (j in 1:ncol(SSE_alpha))
+{
+  #s=c()
+  s[j]=var(return.cc[,j][1:30])
+  SSE1[j]=0
+  s1[1,j]=var(return.cc[,j])
+  for (t in 2:T)
+  {						
+    s[j] =  alpha_rate[j] * ret.cc_rate[,j][t-1]^2+(1- alpha_rate[j]) * s[j] 
+    error[j]=ret.cc_rate[,j][t-1]^2-s[j]
+    SSE1[j]=error[j]^2+SSE1[j]
+    # Alternative Variance Estimate: Abraham, p-147
+  }   
+    
+  for(k in 1:T){
+    s1[k,j]=var(return.cc[,j])
+    s1[k,j] = alpha_rate[j] * ret.cc_rate[,j][k]^2+(1- alpha_rate[j]) * s1[k,j] 
+    ee1[k,j]=(ret.cc_rate[,j][k]^2-s1[k,j])^2
+  }
+  error1[j]=sum(ee1[,j])
+  ss1[j]=sqrt((error1[j]/value))
+  
+  VaR_rate[j] = -qnorm(p) * sqrt(s[j]) * value
+  ES_rate[j] = sqrt(s[j])*dnorm(qnorm(p))/p * value # ES calculation
+}
+
+# VaR_rate;alpha_rate;ES_rate;SSE1;s;ss1
+
+EWMADD=data.frame(names(ret.cc_rate),VaR_rate,alpha_rate,ES_rate);
+EWMADD
+
+```
+
+\subsection{DD-EWMA}
+
+```{r}
+return.cc=data.frame(return.cc)
+nrow(return.cc) 
+WE=1000 # Estimation window which will be used to calculate VaR
+ret.cc_rate=tail(return.cc,WE) # Discard first few observations to ensure TxP as integer				
+
+T=nrow(ret.cc_rate)
+
+value = 1000						
+p = 0.01			
+abs.return.cc=abs(return.cc)
+nrow(abs.return.cc)
+beta=1-p	
+
+alpha=seq(.01,.3,.01)
+SSE_alpha=matrix(0,nrow=length(alpha),ncol=ncol(abs.return.cc))
+
+# Function to get optimal alpha that gives minimum SSE for all data together
+for (j in 1:ncol(abs.return.cc)) #j is the number of datasets
+{
+  s=c()
+  SSE=c()
+  error=c()
+  for (a in 1:length(alpha))
+  {
+    s[j]=mean(abs.return.cc[,j][1:30])
+    SSE[j]=0				
+    for (t in 2:T)
+    {	
+      error[j]=(1/rho[j])* abs(return.cc[,j][t-1])-s[j]
+      SSE[j]=error[j]^2+SSE[j]
+      s[a]=alpha[a]*(1/rho[j])* abs(return.cc[,j][t-1])+(1-alpha[a]) * s[j] 
+      s[j]=s[a]
+    }
+    SSE_alpha[a,j]=SSE[j]
+  }
+}  
+# Make a data frame of errors for all datasets.
+#data_errorRE=data.frame(alpha,SSE_alpha);View(data_errorRE)
+
+# Finding the minimum alpha for all datasets together.
+alpha_rateDDt=c()
+for (j in 1:ncol(SSE_alpha))
+{
+  for (b in 1:length(alpha))
+  {
+    if (SSE_alpha[b,j]==min(SSE_alpha[,j]))
+      alpha_rateDDt[j]=alpha[b]
+  }
+}
+
+### Estimate df using rho estimates
+
+df=c()
+for (i in 1:ncol(return.cc))
+{
+fun <- function (x) rho[i]*(x-1)*beta(x/2,1/2)-2*sqrt(x-2)
+df[i] <- uniroot(fun, c(3, 8))$root
+}
+df
+
+# Use the minimum alpha to get VaR value
+VaR_rateDDt=c()
+ES_rateDDt=c()
+error=c()
+SSE_DDt=c()
+cv=c()
+s=c()
+
+s1=matrix(NA,1000,ncol(return.cc))
+ee1=matrix(NA,1000,ncol(return.cc))
+error1=c()
+ss1_DDt=c()
+for (j in 1:ncol(return.cc))
+{ 
+ 
+  s[j]=mean(abs.return.cc[,j][1:30])
+  SSE_DDt[j]=0
+  for (t in 2:T)
+  {	
+    s[j] =alpha_rateDDt[j] * (1/rho[j])* abs(ret.cc_rate[,j][t-1])+(1- alpha_rateDDt[j]) * s[j] 
+    error[j]=(1/rho[j])* abs(ret.cc_rate[,j][t-1])-s[j]
+    SSE_DDt[j]=error[j]^2+SSE_DDt[j]
+  }
+  
+  for(k in 1:T){
+    s1[k,j]=mean(abs(return.cc[,j]))
+    s1[k,j] = alpha_rateDDt[j] * abs(ret.cc_rate[,j][k])+(1- alpha_rateDDt[j]) * s1[k,j] 
+    ee1[k,j]=abs(abs(ret.cc_rate[,j][k])-s1[k,j])
+  }
+  error1[j]=sum(ee1[,j])
+  ss1_DDt[j]=(1/rho[j])*(error1[j]/value)
+  
+  
+  cv[j] = tinv(p, df[j])
+  #VaR= - sf * cv
+  ##VaR_rateDDt[j] =- s[j] * qt(p,df[j]) * value  # using t and df
+  VaR_rateDDt[j] = (-1)* s[j] *  cv[j]*value   #qt(p,df[j])
+  
+  #ES_rateRE[j] = (-1)* s[j] * (log(2*(1-beta))-1)*value 
+  ES_rateDDt[j] =-s[j]*integrate(function(q) {q*dt(q,df[j])} *sqrt((df[j]-2)/df[j]),-Inf,qt(p,df[j]))$value/(p) * value
+  
+}
+
+EWMADD=data.frame(names(ret.cc_rate),VaR_rateDDt,alpha_rateDDt,ES_rateDDt);
+EWMADD
+print(xtable(EWMADD), include.rownames=FALSE)
+```
+
+\subsection{Method4 - GARCH}
+
+```{r warning=FALSE}
+########################## Method: GARCH ###########################
+	
+############# Normal GARCH ##########
+VaR_rateG=c()
+sigma_rate=c()
+omega=c()
+alpha=c()
+beta=c()
+ES_rateG=c()
+for (j in 1:ncol(ret.cc_rate))
+{
+  g = garchFit(~garch(1,1),ret.cc_rate[,j],cond.dist="norm",include.mean=FALSE,
+               trace=FALSE)
+  omega[j] = g@fit$matcoef[1,1]
+  alpha[j] = g@fit$matcoef[2,1]
+  beta[j] = g@fit$matcoef[3,1]
+  sigma_rate[j] =  omega[j] + alpha[j] * ret.cc_rate[,j][T]^2 + beta[j] * g@h.t[T]
+  VaR_rateG[j] = -sqrt(sigma_rate[j]) * qnorm(p) * value
+  # ES calculation
+  ES_rateG[j] = -sqrt(sigma_rate[j])*integrate(function(q){q*dnorm(q)},-Inf,qnorm(p))$value/(p) * value
+}
+# VaR_rateG;sigma_rate;ES_rateG
+# garch_output=data.frame(VaR_rateG,ES_rateG,sigma_rate,omega,alpha,beta);garch_output
+
+### Danielson (using ruGarch)
+
+# spec = ugarchspec(variance.model = list( garchOrder = c(1, 1)),
+#                   mean.model = list( armaOrder = c(0,0),include.mean = FALSE))
+# res = ugarchfit(spec = spec, data = ret.cc_rate[,1])
+# omega = res@fit$coef['omega']
+# alpha = res@fit$coef['alpha1']
+# beta = res@fit$coef['beta1']
+# sigma2 = omega + alpha * tail(y1,1)^2 + beta * tail(res@fit$var,1)
+# VaR9 = -sqrt(sigma2) * qnorm(p) * value
+# names(VaR9)="VaR"
+# print(VaR9)
+
+NGarchSummary=data.frame(names(ret.cc_rate),VaR_rateG,ES_rateG)
+NGarchSummary
+
+```
+
+\subsection{Method5 - t-GARCH}
+
+```{r warning=FALSE}
+############# t GARCH ###################
+VaR_ratetG=c()
+VaR_ratetG1=c()
+sigma_rate=c()
+omega=c()
+alphaG=c()
+beta=c()
+ES_ratetG=c()
+ES_ratetG1=c()
+dfG=c()
+for (j in 1:ncol(ret.cc_rate)) ## USTD giving error when finding inverse of hessian (in garchfit)
+{
+  g = garchFit(~garch(1,1),ret.cc_rate[,j],cond.dist="std",include.mean=FALSE,
+               trace=FALSE)
+  omega[j] = g@fit$matcoef[1,1]
+  alphaG[j] = g@fit$matcoef[2,1]
+  beta[j] = g@fit$matcoef[3,1]
+  dfG[j]=g@fit$matcoef[4,1]
+  sigma_rate[j] =  omega[j] + alpha[j] * ret.cc_rate[,j][T]^2 + beta[j] * g@h.t[T]
+  VaR_ratetG[j] = -sqrt(sigma_rate[j]) * qstd(p) * value  # using std and 5 df
+  VaR_ratetG1[j] =-sqrt(sigma_rate[j]) * qt(p,dfG[j]) * value  # using t and df
+  #ES calculation
+  ES_ratetG[j] = -sqrt(sigma_rate[j])*integrate(function(q) {q*dstd(q)} *sqrt((5-2)/5),-Inf,qstd(p))$value/(p) * value
+  # using t and df
+  ES_ratetG1[j] = -sqrt(sigma_rate[j])*integrate(function(q) {q*dt(q,dfG[j])} *sqrt((dfG[j]-2)/dfG[j]),-Inf,qt(p,dfG[j]))$value/(p) * value
+}
+# VaR_ratetG;VaR_ratetG1;sigma_rate;ES_ratetG;ES_ratetG1
+# garch_output1=data.frame(VaR_ratetG,ES_ratetG,sigma_rate,omega,alphaG,beta);garch_output1
+
+# garch_tdist=data.frame(dfG,VaR_ratetG1,ES_ratetG1);garch_tdist
+
+tGarchSummary=data.frame(names(ret.cc_rate),VaR_ratetG1,dfG,ES_ratetG1)
+tGarchSummary
+
+```
+
+
+\subsection{Summary - HS, MA, EWMA, Normal Garch, tGarch}
+
+```{r}
+
+tempVar=data.frame(HSsummary$VaRrate_HS,MAsummary$VaR_MA,EWMADanielsson$VaR_rateFixed,NGarchSummary$VaR_rateG,tGarchSummary$VaR_ratetG1)
+ModelRiskVar=c()
+ModelRiskVar=apply(tempVar,1,max)/apply(tempVar,1,min)
+
+SummaryCompare=data.frame(names(ret.cc_rate),HSsummary$VaRrate_HS,MAsummary$VaR_MA,EWMADanielsson$VaR_rateFixed,NGarchSummary$VaR_rateG,tGarchSummary$VaR_ratetG1,tGarchSummary$dfG,ModelRiskVar)
+names(SummaryCompare)=c("Stock","HS","MA","EWMA","NGarch","tGarch","df","ModelRisk")
+SummaryCompare
+print(xtable(SummaryCompare), include.rownames=FALSE)
+
+```
+
+
+```{r}
+
+tempES=data.frame(HSsummary$ESrate_HS,MAsummary$ES_MA,EWMADanielsson$ES_rateFixed,NGarchSummary$ES_rateG,tGarchSummary$ES_ratetG1)
+ModelRiskES=c()
+ModelRiskES=apply(tempES,1,max)/apply(tempES,1,min)
+
+SummaryCompare1=data.frame(names(ret.cc_rate),HSsummary$ESrate_HS,MAsummary$ES_MA,EWMADanielsson$ES_rateFixed,NGarchSummary$ES_rateG,tGarchSummary$ES_ratetG1,tGarchSummary$dfG,ModelRiskES)
+names(SummaryCompare1)=c("Stock","HS","MA","EWMA","NGarch","tGarch","df","ModelRisk")
+SummaryCompare1
+print(xtable(SummaryCompare1), include.rownames=FALSE)
+```
+
