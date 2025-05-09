@@ -14,3 +14,10 @@ Data: The provided R codes download data directly from [Yahoo!Finance](https://c
 
 In this work, we obtained the forecasts of Value at Risk (VaR) and Expected Shortfall (ES) for the top six cryptocurrencies by market capitalization. We used both the traditional time series models as well as relatively recent data-driven, regularized, and neuro-volatility methods to get the volatility forecasts. We also compare the stability of our forecasts using the Model Risk metric. 
 Also, to compare the quality of forecasts between data-driven and neuro-volatility models, we obtain fuzzy confidence intervals for the forecasts using a trapezoidal membership function. The narrower fuzzy intervals imply a better forecast quality. We observed that the data-driven models produced better forecasts for cryptocurrencies, while for the regular stocks and indexes, the neuro-volatility model gave better forecasts. Also, the data-driven models are much more efficient in terms of computational complexity, as the running time of the neuro-volatility model is significantly higher than that of the data-driven model.
+
+### References
+
+1. R. J. Hyndman and G. Athanasopoulos, Forecasting: principles and practice, 3rd edition, OTexts: Melbourne, Australia. OTexts.com/fpp3, 2021.
+2. Thavaneswaran, A., Paseka, A., \& Frank, J. (2020). Generalized value at risk forecasting. Communications in Statistics-Theory and Methods, 49(20), 4988-4995.
+
+
